@@ -4,7 +4,7 @@
 #include <random>
 #include <vector>
 
-#include "../cuckoo_set.hpp"
+#include "cuckoo_set.hpp"
 #include "hash.hpp"
 #include "huge_page_allocator.hpp"
 
@@ -15,9 +15,7 @@ constexpr size_t NUM_REQUESTS = 100000000;
 constexpr size_t NUM_KEYS = CAPACITY * LOAD_PERCENTAGE / 100;
 
 using HugeVecT = std::vector<size_t, huge_page_allocator<size_t>>;
-using CuckooTableT =
-    cuckoo_set::cuckoo_set<CRCHash<uint64_t>,
-                           huge_page_allocator<cuckoo_set::Bucket>>;
+using CuckooTableT = cuckoo_set::cuckoo_set<CRCHash<uint64_t>, huge_page_allocator<cuckoo_set::Bucket>>;
 
 void run_test(const HugeVecT& read_idxs) {
   CuckooTableT table(CAPACITY);
