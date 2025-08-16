@@ -38,11 +38,13 @@ void run_test(const HugeVecT& read_idxs) {
   std::array<typename CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
   for (size_t i = 0; i < NUM_REQUESTS; i += MAX_LOOKUP_BATCH_SZ) {
     table.find_batched(&read_idxs[i], MAX_LOOKUP_BATCH_SZ, results.data());
+#ifndef NDEBUG
     for (size_t j = 0; j < MAX_LOOKUP_BATCH_SZ; ++j) {
       bool exists = !results[j].is_null();
       bool expected_exists = read_idxs[i + j] < NUM_KEYS;
       assert(exists == expected_exists);
     }
+#endif
   }
 
   std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
