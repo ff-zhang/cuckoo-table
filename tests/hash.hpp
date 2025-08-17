@@ -7,8 +7,8 @@ struct CRCHash;
 
 template <>
 struct CRCHash<uint64_t> {
-  size_t operator()(uint64_t value) const noexcept {
-    uint32_t crc = __crc32cd(0, value);
-    return (static_cast<uint64_t>(crc) << 32) | crc;
+  size_t operator()(const uint64_t value) const noexcept {
+    const uint32_t crc = __crc32cd(0, value);
+    return static_cast<size_t>(crc) << 32 | crc;
   }
 };

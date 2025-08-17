@@ -35,11 +35,8 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
     iterator(KeyT* slot)
         : slot_(slot) {}
 
-    bool is_null() { return !slot_; }
-
-    const KeyT& key() {
-      return *slot_;
-    }
+    bool is_null() const { return !slot_; }
+    const KeyT& key() const { return *slot_; }
 
     KeyT* slot_;
   };
@@ -173,21 +170,27 @@ class cuckoo_set {
     std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id1s;
     std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id2s;
 
-    // compute hashes and prefetch buckets
+    // Compute hashes and prefetch buckets
     for (size_t i = 0; i < num_keys; ++i) {
-      size_t hash = hash_key(keys[i]);
-      bucket_id1s[i] = get_bucket_id(hash);
-      bucket_id2s[i] = get_other_bucket_id(hash, keys[i]);
+      bucket_id2s[i] = hash_key(keys[i]);
+      bucket_id1s[i] = get_bucket_id(bucket_id2s[i]);
       __builtin_prefetch(&buckets_[bucket_id1s[i]], 0, 3);
-      __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
     }
 
-    // search buckets via SIMD
+    // Search buckets via SIMD
     for (size_t i = 0; i < num_keys; ++i) {
       results[i] = buckets_[bucket_id1s[i]].find_simd(keys[i]);
-      if (results[i].is_null()) {
-        results[i] = buckets_[bucket_id2s[i]].find_simd(keys[i]);
-      }
+    }
+
+    // Search second bucket for any misses
+    for (size_t i = 0; i < num_keys; ++i) {
+      if (!results[i].is_null()) continue;
+      bucket_id2s[i] = get_other_bucket_id(bucket_id2s[i], keys[i]);
+      __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
+    }
+    for (size_t i = 0; i < num_keys; ++i) {
+      if (!results[i].is_null()) continue;
+      results[i] = buckets_[bucket_id2s[i]].find_simd(keys[i]);
     }
   }
 
