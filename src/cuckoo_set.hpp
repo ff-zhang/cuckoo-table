@@ -60,22 +60,15 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
     const uint64x2x2_t slots = vld1q_u64_x2(&key_slots[0]);
 
     // Compare each lane (and get either 0xFFFF or 0x0)
-    const uint64x2_t cmp0 = vceqq_u64(slots.val[0], keys);
-    const uint64x2_t cmp1 = vceqq_u64(slots.val[1], keys);
+    const uint64x2_t eq0 = vceqq_u64(slots.val[0], keys);
+    const uint64x2_t eq1 = vceqq_u64(slots.val[1], keys);
 
-    // Truncate each 64-bit lane to 32-bits and store them in a 128-bit vector
-    const uint32x2_t flag0 = vshrn_n_u64(cmp0, 31);
-    const uint32x2_t flag1 = vshrn_n_u64(cmp1, 31);
-    const uint32x4_t flags = vcombine_u32(flag0, flag1);
-
-    // Create a move mask
-    const uint32x4_t weighted = vshlq_u32(flags, (int32x4_t){0, 1, 2, 3});
-    const uint32_t mask = vaddvq_u32(weighted);
-
-    // Return first matched slot or nullptr
-    return mask
-      ? iterator{ &key_slots[__builtin_ctz(mask)] }
-      : iterator{};
+    // Return the first matched slot
+    if (vgetq_lane_u64(eq0, 0)) return iterator(&key_slots[0]);
+    if (vgetq_lane_u64(eq0, 1)) return iterator(&key_slots[1]);
+    if (vgetq_lane_u64(eq1, 0)) return iterator(&key_slots[2]);
+    if (vgetq_lane_u64(eq1, 1)) return iterator(&key_slots[3]);
+    return iterator();
   }
 
   bool insert(KeyT key) {
