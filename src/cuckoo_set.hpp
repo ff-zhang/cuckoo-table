@@ -173,17 +173,17 @@ class cuckoo_set {
       __builtin_prefetch(&buckets_[bucket_id1s[i]], 0, 3);
     }
 
-    // Search buckets via SIMD
+    // Probe the first bucket using SIMD
     for (size_t i = 0; i < num_keys; ++i) {
       results[i] = buckets_[bucket_id1s[i]].find_simd(keys[i]);
+      if (results[i].is_null()) {
+        // Prepare to probe second bucket
+        bucket_id2s[i] = get_other_bucket_id(bucket_id2s[i], keys[i]);
+        __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
+      }
     }
 
-    // Search second bucket for any misses
-    for (size_t i = 0; i < num_keys; ++i) {
-      if (!results[i].is_null()) continue;
-      bucket_id2s[i] = get_other_bucket_id(bucket_id2s[i], keys[i]);
-      __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
-    }
+    // Probe the second bucket for any misses
     for (size_t i = 0; i < num_keys; ++i) {
       if (!results[i].is_null()) continue;
       results[i] = buckets_[bucket_id2s[i]].find_simd(keys[i]);
