@@ -14,8 +14,8 @@ constexpr size_t HIT_PERCENTAGE = 80;
 constexpr size_t NUM_REQUESTS = 100000000;
 constexpr size_t NUM_KEYS = CAPACITY * LOAD_PERCENTAGE / 100;
 
-using HugeVecT = std::vector<size_t, huge_page_allocator<size_t>>;
-using CuckooTableT = cuckoo_set::cuckoo_set<CRCHash<uint64_t>, huge_page_allocator<cuckoo_set::Bucket>>;
+using HugeVecT = std::vector<uint32_t, huge_page_allocator<uint32_t>>;
+using CuckooTableT = cuckoo_set::cuckoo_set<CRCHash<uint32_t>, huge_page_allocator<cuckoo_set::Bucket>>;
 
 void run_test(const HugeVecT& read_idxs) {
   CuckooTableT table(CAPACITY);

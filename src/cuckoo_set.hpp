@@ -1,8 +1,6 @@
 #pragma once
 
 #include <array>
-#include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <stdexcept>
 
@@ -14,16 +12,15 @@ namespace cuckoo_set {
 constexpr std::size_t hardware_constructive_interference_size = 64;
 
 // We fix the key type to control the bucket size carefully.
-using KeyT = uint64_t;
+using key_t = uint32_t;
 
-constexpr KeyT NULL_KEY = -1;
-
+constexpr key_t NULL_KEY = -1;
 constexpr size_t NULL_SLOT_IDX = -1;
-constexpr size_t SLOTS_PER_BUCKET = 4;
+
+constexpr size_t SLOTS_PER_BUCKET = hardware_constructive_interference_size / (2 * sizeof(key_t));
 static_assert((SLOTS_PER_BUCKET & (SLOTS_PER_BUCKET - 1)) == 0);
 
-constexpr size_t MAX_LOOKUP_BATCH_SZ =
-    hardware_constructive_interference_size / sizeof(KeyT);
+constexpr size_t MAX_LOOKUP_BATCH_SZ = hardware_constructive_interference_size / sizeof(key_t);
 
 // each bucket is half-a-cache-line sized, and aligned to that as well
 // i.e. we get 2 buckets per cache line
@@ -32,18 +29,18 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
     iterator()
         : slot_(nullptr) {}
 
-    iterator(KeyT* slot)
+    iterator(key_t* slot)
         : slot_(slot) {}
 
     bool is_null() const { return !slot_; }
-    const KeyT& key() const { return *slot_; }
+    const key_t& key() const { return *slot_; }
 
-    KeyT* slot_;
+    key_t* slot_;
   };
 
-  std::array<KeyT, SLOTS_PER_BUCKET> key_slots;
+  std::array<key_t, SLOTS_PER_BUCKET> key_slots;
 
-  iterator find(KeyT key) {
+  iterator find(key_t key) {
     for (size_t i = 0; i < SLOTS_PER_BUCKET; ++i) {
       if (key_slots[i] == key) {
         return {&key_slots[i]};
@@ -52,49 +49,54 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
     return {};
   }
 
-  iterator find_simd(const KeyT key) {
-    static_assert(SLOTS_PER_BUCKET == 4, "Only 4 slots supported");
+  iterator find_simd(const key_t key) {
+    // static_assert(SLOTS_PER_BUCKET == 4, "Only 4 slots supported");
 
     // Broadcast key and load 4 slots
-    const uint64x2_t keys = vdupq_n_u64(key);
-    const uint64x2x2_t slots = vld1q_u64_x2(&key_slots[0]);
+    const uint32x4_t keys = vdupq_n_u32(key);
+    const uint32x4x2_t slots = vld1q_u32_x2(&key_slots[0]);
 
     // Compare each lane (and get either 0xFFFF or 0x0)
-    const uint64x2_t eq0 = vceqq_u64(slots.val[0], keys);
-    const uint64x2_t eq1 = vceqq_u64(slots.val[1], keys);
+    const uint32x4_t eq0 = vceqq_u32(slots.val[0], keys);
+    const uint32x4_t eq1 = vceqq_u32(slots.val[1], keys);
 
     // Return the first matched slot
-    if (vgetq_lane_u64(eq0, 0)) return iterator(&key_slots[0]);
-    if (vgetq_lane_u64(eq0, 1)) return iterator(&key_slots[1]);
-    if (vgetq_lane_u64(eq1, 0)) return iterator(&key_slots[2]);
-    if (vgetq_lane_u64(eq1, 1)) return iterator(&key_slots[3]);
+    if (vgetq_lane_u32(eq0, 0)) return iterator(&key_slots[0]);
+    if (vgetq_lane_u32(eq0, 1)) return iterator(&key_slots[1]);
+    if (vgetq_lane_u32(eq0, 2)) return iterator(&key_slots[2]);
+    if (vgetq_lane_u32(eq0, 3)) return iterator(&key_slots[3]);
+    if (vgetq_lane_u32(eq1, 0)) return iterator(&key_slots[4]);
+    if (vgetq_lane_u32(eq1, 1)) return iterator(&key_slots[5]);
+    if (vgetq_lane_u32(eq1, 2)) return iterator(&key_slots[6]);
+    if (vgetq_lane_u32(eq1, 3)) return iterator(&key_slots[7]);
     return iterator();
   }
 
-  bool insert(KeyT key) {
+  bool insert(const key_t key) {
     for (size_t i = 0; i < SLOTS_PER_BUCKET; ++i) {
       if (is_empty(key_slots[i])) {
         update(i, key);
         return true;
-      } else if (key_slots[i] == key) {
+      }
+      if (key_slots[i] == key) {
         throw std::runtime_error{"tried to insert existing key"};
       }
     }
     return false;
   }
 
-  KeyT displace_insert(KeyT key) {
-    size_t disp_idx = get_random_displace_idx();
-    KeyT to_displace = key_slots[disp_idx];
+  key_t displace_insert(const key_t key) {
+    const size_t disp_idx = get_random_displace_idx();
+    const key_t to_displace = key_slots[disp_idx];
     update(disp_idx, key);
     return to_displace;
   }
 
-  void update(size_t i, KeyT key) {
+  void update(const size_t i, const key_t key) {
     key_slots[i] = key;
   }
 
-  void erase(size_t i) {
+  void erase(const size_t i) {
     key_slots[i] = NULL_KEY;
   }
 
@@ -105,15 +107,17 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
     return curr_idx & (SLOTS_PER_BUCKET - 1);
   }
 
-  static bool is_empty(const KeyT& key) { return key == NULL_KEY; }
+  static bool is_empty(const key_t& key) { return key == NULL_KEY; }
 };
 static_assert(alignof(Bucket) == hardware_constructive_interference_size / 2);
 static_assert(sizeof(Bucket) == hardware_constructive_interference_size / 2);
 
-template <class Hash = std::hash<KeyT>,
-          class Allocator = std::allocator<Bucket>>
+template <
+  class Hash = std::hash<key_t>,
+  class Allocator = std::allocator<Bucket>
+>
 class cuckoo_set {
- public:
+public:
   using iterator = Bucket::iterator;
 
   cuckoo_set(size_t capacity)
@@ -121,7 +125,8 @@ class cuckoo_set {
         allocator_(),
         num_buckets_(next_pow2(capacity) / SLOTS_PER_BUCKET),
         bucket_bitmask_(num_buckets_ - 1),
-        buckets_() {
+        buckets_()
+  {
     if ((num_buckets_ & (num_buckets_ - 1)) != 0) {
       throw std::invalid_argument("num_buckets must be a power of 2");
     }
@@ -143,26 +148,26 @@ class cuckoo_set {
     }
   }
 
-  size_t size() { return sz_; }
+  size_t size() const { return sz_; }
 
-  double load_factor() {
+  double load_factor() const {
     return static_cast<double>(sz_) / (num_buckets_ * SLOTS_PER_BUCKET);
   }
 
-  iterator find(KeyT key) {
-    size_t hash = hash_key(key);
-    size_t bucket_id1 = get_bucket_id(hash);
+  iterator find(const key_t key) {
+    const size_t hash = hash_key(key);
+    const size_t bucket_id1 = get_bucket_id(hash);
 
     auto it = buckets_[bucket_id1].find_simd(key);
     if (!it.is_null()) {
       return it;
     }
 
-    size_t bucket_id2 = get_other_bucket_id(hash, key);
+    const size_t bucket_id2 = get_other_bucket_id(hash, key);
     return buckets_[bucket_id2].find_simd(key);
   }
 
-  void find_batched(const KeyT* keys, size_t num_keys, iterator* results) {
+  void find_batched(const key_t* keys, const size_t num_keys, iterator* results) {
     std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id1s;
     std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id2s;
 
@@ -195,12 +200,12 @@ class cuckoo_set {
     *it.slot_ = NULL_KEY;
   }
 
-  void insert(KeyT key) {
+  void insert(key_t key) {
     sz_++;
 
-    size_t hash = hash_key(key);
-    size_t bucket_id1 = get_bucket_id(hash);
-    size_t bucket_id2 = get_other_bucket_id(hash, key);
+    const size_t hash = hash_key(key);
+    const size_t bucket_id1 = get_bucket_id(hash);
+    const size_t bucket_id2 = get_other_bucket_id(hash, key);
 
     Bucket& bucket1 = buckets_[bucket_id1];
     if (bucket1.insert(key)) {
@@ -218,12 +223,12 @@ class cuckoo_set {
  private:
   static constexpr size_t MAX_INSERT_DEPTH = 256;
 
-  void displace_insert(size_t bucket_id, KeyT key, size_t curr_depth) {
+  void displace_insert(const size_t bucket_id, const key_t key, const size_t curr_depth) {
     if (curr_depth >= MAX_INSERT_DEPTH) {
       throw std::runtime_error{"cannot find insertion slot."};
     }
 
-    KeyT displaced_slot = buckets_[bucket_id].displace_insert(key);
+    key_t displaced_slot = buckets_[bucket_id].displace_insert(key);
 
     size_t hash = hash_key(displaced_slot);
     size_t bucket_id1 = get_bucket_id(hash);
@@ -249,9 +254,9 @@ class cuckoo_set {
     return x;
   }
 
-  size_t hash_key(KeyT key) { return hash_fn_(key); }
-  size_t get_bucket_id(size_t h) { return h & bucket_bitmask_; }
-  size_t get_other_bucket_id(size_t h, KeyT k) {
+  size_t hash_key(key_t key) { return hash_fn_(key); }
+  size_t get_bucket_id(const size_t h) const { return h & bucket_bitmask_; }
+  size_t get_other_bucket_id(const size_t h, const key_t k) {
     return hash_fn_(h ^ k) & bucket_bitmask_;
   }
 
