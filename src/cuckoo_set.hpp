@@ -61,13 +61,13 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
 
     // Compare each lane (and get either 0xFFFF or 0x0)
     const uint64x2_t eq0 = vceqq_u64(slots.val[0], keys);
-    const uint64x2_t eq1 = vceqq_u64(slots.val[1], keys);
-
-    // Return the first matched slot
     if (vgetq_lane_u64(eq0, 0)) return iterator(&key_slots[0]);
     if (vgetq_lane_u64(eq0, 1)) return iterator(&key_slots[1]);
+
+    const uint64x2_t eq1 = vceqq_u64(slots.val[1], keys);
     if (vgetq_lane_u64(eq1, 0)) return iterator(&key_slots[2]);
     if (vgetq_lane_u64(eq1, 1)) return iterator(&key_slots[3]);
+
     return iterator();
   }
 
