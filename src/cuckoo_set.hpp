@@ -23,6 +23,12 @@ static_assert((SLOTS_PER_BUCKET & (SLOTS_PER_BUCKET - 1)) == 0);
 
 constexpr size_t MAX_LOOKUP_BATCH_SZ = hardware_constructive_interference_size / sizeof(key_t);
 
+inline uint64_t read_cycle_counter() {
+  uint64_t count;
+  asm volatile("mrs %0, cntvct_el0" : "=r"(count));
+  return count;
+}
+
 // each bucket is half-a-cache-line sized, and aligned to that as well
 // i.e. we get 2 buckets per cache line
 struct alignas(hardware_constructive_interference_size / 2) Bucket {
@@ -54,16 +60,16 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
     // static_assert(SLOTS_PER_BUCKET == 4, "Only 4 slots supported");
 
     // Broadcast key and load 4 slots
-    auto begin = std::chrono::steady_clock::now();
+    uint64_t start = read_cycle_counter();
     const uint32x4_t keys = vdupq_n_u32(key);
     const uint32x4x2_t slots = vld1q_u32_x2(&key_slots[0]);
-    load_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
+    load_cycles_ += read_cycle_counter() - start;
 
     // Compare each lane (and get either 0xFFFF or 0x0)
-    begin = std::chrono::steady_clock::now();
+    start = read_cycle_counter();
     const uint32x4_t eq0 = vceqq_u32(slots.val[0], keys);
     const uint32x4_t eq1 = vceqq_u32(slots.val[1], keys);
-    compare_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
+    compare_cycles_ += read_cycle_counter() - start;
 
     // Return the first matched slot
     if (vgetq_lane_u32(eq0, 0)) return iterator(&key_slots[0]);
@@ -106,13 +112,13 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
   }
 
   static void report(const size_t count) {
-    std::cout << "Bucket load time: " << std::endl;
-    std::cout << "\taverage: " << load_ns_ / count << " ns" << std::endl;
-    std::cout << "\ttotal: " << load_ns_ << " ns" << std::endl;
+    std::cout << "Bucket load cycles: " << std::endl;
+    std::cout << "\taverage: " << load_cycles_ / count << " cycles" << std::endl;
+    std::cout << "\ttotal: " << load_cycles_ << " cycles" << std::endl;
 
-    std::cout << "Bucket compare time: " << std::endl;
-    std::cout << "\taverage: " << compare_ns_ / count << " ns" << std::endl;
-    std::cout << "\ttotal: " << compare_ns_ << " ns" << std::endl;
+    std::cout << "Bucket compare cycles: " << std::endl;
+    std::cout << "\taverage: " << compare_cycles_ / count << " cycles" << std::endl;
+    std::cout << "\ttotal: " << compare_cycles_ << " cycles" << std::endl;
   }
 
  private:
@@ -124,8 +130,8 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
 
   static bool is_empty(const key_t& key) { return key == NULL_KEY; }
 
-  static uint64_t load_ns_;
-  static uint64_t compare_ns_;
+  static inline uint64_t load_cycles_ = 0;
+  static inline uint64_t compare_cycles_ = 0;
 };
 static_assert(alignof(Bucket) == hardware_constructive_interference_size / 2);
 static_assert(sizeof(Bucket) == hardware_constructive_interference_size / 2);
@@ -309,8 +315,8 @@ public:
 
   size_t sz_{0};
 
-  static uint64_t compute_ns_;
-  static uint64_t probe_ns_;
+  static inline uint64_t compute_ns_ = 0;
+  static inline uint64_t probe_ns_ = 0;
 };
 
 }  // namespace cuckoo_set
