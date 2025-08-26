@@ -31,11 +31,12 @@ void run_test(const HugeVecT& read_idxs) {
   assert(table.size() == NUM_KEYS);
 
   // do lookups and measure throughput
-  std::chrono::steady_clock::time_point begin =
-      std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
   using cuckoo_set::MAX_LOOKUP_BATCH_SZ;
   std::array<typename CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
+
+  size_t count = 0;
   for (size_t i = 0; i < NUM_REQUESTS; i += MAX_LOOKUP_BATCH_SZ) {
     table.find_batched(&read_idxs[i], MAX_LOOKUP_BATCH_SZ, results.data());
     for (size_t j = 0; j < MAX_LOOKUP_BATCH_SZ; ++j) {
@@ -43,15 +44,16 @@ void run_test(const HugeVecT& read_idxs) {
       bool expected_exists = read_idxs[i + j] < NUM_KEYS;
       assert(exists == expected_exists);
     }
+    count++;
   }
 
   std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-  auto elapsed_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(end - begin)
-          .count();
+  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(end - begin).count();
   double throughput = static_cast<double>(NUM_REQUESTS) / (elapsed_us / 1e6);
 
   std::cout << "cuckoo_set lookup throughput: " << throughput << std::endl;
+
+  CuckooTableT::report(count);
 
   // do deletions
   for (size_t i = 0; i < NUM_KEYS; ++i) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <memory>
 #include <stdexcept>
 
@@ -53,12 +54,16 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
     // static_assert(SLOTS_PER_BUCKET == 4, "Only 4 slots supported");
 
     // Broadcast key and load 4 slots
+    auto begin = std::chrono::steady_clock::now();
     const uint32x4_t keys = vdupq_n_u32(key);
     const uint32x4x2_t slots = vld1q_u32_x2(&key_slots[0]);
+    load_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
 
     // Compare each lane (and get either 0xFFFF or 0x0)
+    begin = std::chrono::steady_clock::now();
     const uint32x4_t eq0 = vceqq_u32(slots.val[0], keys);
     const uint32x4_t eq1 = vceqq_u32(slots.val[1], keys);
+    compare_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
 
     // Return the first matched slot
     if (vgetq_lane_u32(eq0, 0)) return iterator(&key_slots[0]);
@@ -100,6 +105,16 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
     key_slots[i] = NULL_KEY;
   }
 
+  static void report(const size_t count) {
+    std::cout << "Bucket load time: " << std::endl;
+    std::cout << "\taverage: " << load_ns_ / count << " ns" << std::endl;
+    std::cout << "\ttotal: " << load_ns_ << " ns" << std::endl;
+
+    std::cout << "Bucket compare time: " << std::endl;
+    std::cout << "\taverage: " << compare_ns_ / count << " ns" << std::endl;
+    std::cout << "\ttotal: " << compare_ns_ << " ns" << std::endl;
+  }
+
  private:
   static size_t get_random_displace_idx() {
     static size_t curr_idx{0};
@@ -108,6 +123,9 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
   }
 
   static bool is_empty(const key_t& key) { return key == NULL_KEY; }
+
+  static uint64_t load_ns_;
+  static uint64_t compare_ns_;
 };
 static_assert(alignof(Bucket) == hardware_constructive_interference_size / 2);
 static_assert(sizeof(Bucket) == hardware_constructive_interference_size / 2);
@@ -172,27 +190,36 @@ public:
     std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id2s;
 
     // Compute hashes and prefetch buckets
+    auto begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < num_keys; ++i) {
       bucket_id2s[i] = hash_key(keys[i]);
       bucket_id1s[i] = get_bucket_id(bucket_id2s[i]);
       __builtin_prefetch(&buckets_[bucket_id1s[i]], 0, 3);
     }
+    compute_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
 
     // Search buckets via SIMD
+    begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < num_keys; ++i) {
       results[i] = buckets_[bucket_id1s[i]].find_simd(keys[i]);
     }
+    probe_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
 
     // Search second bucket for any misses
+    begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < num_keys; ++i) {
       if (!results[i].is_null()) continue;
       bucket_id2s[i] = get_other_bucket_id(bucket_id2s[i], keys[i]);
       __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
     }
+    compute_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
+
+    begin = std::chrono::steady_clock::now();
     for (size_t i = 0; i < num_keys; ++i) {
       if (!results[i].is_null()) continue;
       results[i] = buckets_[bucket_id2s[i]].find_simd(keys[i]);
     }
+    probe_ns_ += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
   }
 
   void erase(const iterator& it) {
@@ -218,6 +245,19 @@ public:
     }
 
     return displace_insert(bucket_id1, key, 0);
+  }
+
+
+  static void report(const size_t count) {
+    std::cout << "cuckoo_set compute time: " << std::endl;
+    std::cout << "\taverage: " << compute_ns_ / count << " ns" << std::endl;
+    std::cout << "\ttotal: " << compute_ns_ << " ns" << std::endl;
+
+    std::cout << "cuckoo_set probe time: " << std::endl;
+    std::cout << "\taverage: " << probe_ns_ / count << " ns" << std::endl;
+    std::cout << "\ttotal: " << probe_ns_ << " ns" << std::endl;
+
+    Bucket::report(count);
   }
 
  private:
@@ -268,6 +308,9 @@ public:
   Bucket* buckets_;
 
   size_t sz_{0};
+
+  static uint64_t compute_ns_;
+  static uint64_t probe_ns_;
 };
 
 }  // namespace cuckoo_set
