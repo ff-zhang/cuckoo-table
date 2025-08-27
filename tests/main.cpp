@@ -7,6 +7,7 @@
 #include "cuckoo_set.hpp"
 #include "hash.hpp"
 #include "huge_page_allocator.hpp"
+#include "thread_pool.hpp"
 
 constexpr size_t CAPACITY = 128 * 1024 * 1024;
 constexpr size_t LOAD_PERCENTAGE = 80;
@@ -30,6 +31,8 @@ void run_test(const HugeVecT& read_idxs) {
   }
   assert(table.size() == NUM_KEYS);
 
+  thread_pool pool(2);
+
   // do lookups and measure throughput
   std::chrono::steady_clock::time_point begin =
       std::chrono::steady_clock::now();
@@ -37,7 +40,11 @@ void run_test(const HugeVecT& read_idxs) {
   using cuckoo_set::MAX_LOOKUP_BATCH_SZ;
   std::array<typename CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
   for (size_t i = 0; i < NUM_REQUESTS; i += MAX_LOOKUP_BATCH_SZ) {
-    table.find_batched(&read_idxs[i], MAX_LOOKUP_BATCH_SZ, results.data());
+    pool.queue(
+      i & 0x1,
+      [&]() { table.find_batched(&read_idxs[i], MAX_LOOKUP_BATCH_SZ, results.data()); }
+    );
+
     for (size_t j = 0; j < MAX_LOOKUP_BATCH_SZ; ++j) {
       bool exists = !results[j].is_null();
       bool expected_exists = read_idxs[i + j] < NUM_KEYS;
@@ -52,6 +59,8 @@ void run_test(const HugeVecT& read_idxs) {
   double throughput = static_cast<double>(NUM_REQUESTS) / (elapsed_us / 1e6);
 
   std::cout << "cuckoo_set lookup throughput: " << throughput << std::endl;
+
+  pool.kill();
 
   // do deletions
   for (size_t i = 0; i < NUM_KEYS; ++i) {
