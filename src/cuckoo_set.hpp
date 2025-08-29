@@ -1,9 +1,10 @@
 #pragma once
 
 #include <array>
-#include <cstddef>
-#include <cstdint>
+#include <condition_variable>
+#include <functional>
 #include <memory>
+#include <mutex>
 #include <queue>
 #include <thread>
 #include <stdexcept>
@@ -115,22 +116,27 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
 static_assert(alignof(Bucket) == hardware_constructive_interference_size / 2);
 static_assert(sizeof(Bucket) == hardware_constructive_interference_size / 2);
 
+
+template <class Hash, class Allocator>
+class cuckoo_set;
+
+template <class Hash, class Allocator>
 class cuckoo_worker {
 public:
-    using Param = int; // Change this to whatever type(s) you need
-
-  cuckoo_worker() : stop_(false) {};
+  cuckoo_worker() :  self_(nullptr), stop_(false) {};
 
   ~cuckoo_worker() {
       stop();
   }
 
   void start(
-    const std::function<size_t(KeyT)>* hash_key,
-    const std::function<size_t(size_t)>* get_bucket_id,
-    const std::function<size_t(size_t, KeyT)>* get_other_bucket_id,
+    cuckoo_set<Hash, Allocator>* self,
+    size_t (cuckoo_set<Hash, Allocator>::* hash_key)(KeyT),
+    size_t (cuckoo_set<Hash, Allocator>::* get_bucket_id)(size_t),
+    size_t (cuckoo_set<Hash, Allocator>::* get_other_bucket_id)(size_t, KeyT),
     Bucket* buckets
   ) {
+    self_ = self;
     hash_key_ = hash_key;
     get_bucket_id_ = get_bucket_id;
     get_other_bucket_id_ = get_other_bucket_id;
@@ -179,8 +185,8 @@ private:
 
       // Compute hashes and prefetch buckets
       for (size_t i = 0; i < num_keys; ++i) {
-        bucket_id2s[i] = (*hash_key_)(keys[i]);
-        bucket_id1s[i] = (*get_bucket_id_)(bucket_id2s[i]);
+        bucket_id2s[i] = (self_->*hash_key_)(keys[i]);
+        bucket_id1s[i] = (self_->*get_bucket_id_)(bucket_id2s[i]);
         __builtin_prefetch(&buckets_[bucket_id1s[i]], 0, 3);
       }
 
@@ -192,7 +198,7 @@ private:
       // Search second bucket for any misses
       for (size_t i = 0; i < num_keys; ++i) {
         if (!results[i].is_null()) continue;
-        bucket_id2s[i] = (*get_other_bucket_id_)(bucket_id2s[i], keys[i]);
+        bucket_id2s[i] = (self_->*get_other_bucket_id_)(bucket_id2s[i], keys[i]);
         __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
       }
       for (size_t i = 0; i < num_keys; ++i) {
@@ -202,6 +208,7 @@ private:
     }
   }
 
+  cuckoo_set<Hash, Allocator>* self_;
   bool stop_;
 
   std::thread thread_;
@@ -210,15 +217,15 @@ private:
   std::queue<std::tuple<const KeyT*, size_t, Bucket::iterator*>> jobs_;
   std::condition_variable cv_;
 
-  const std::function<size_t(KeyT)>* hash_key_ = nullptr;
-  const std::function<size_t(size_t)>* get_bucket_id_ = nullptr;
-  const std::function<size_t(size_t, KeyT)>* get_other_bucket_id_ = nullptr;
+  size_t (cuckoo_set<Hash, Allocator>::*hash_key_)(KeyT) = nullptr;
+  size_t (cuckoo_set<Hash, Allocator>::*get_bucket_id_)(size_t) = nullptr;
+  size_t (cuckoo_set<Hash, Allocator>::*get_other_bucket_id_)(size_t, KeyT) = nullptr;
 
   Bucket* buckets_ = nullptr;
 };
 
-template <class Hash = std::hash<KeyT>,
-          class Allocator = std::allocator<Bucket>>
+  template <class Hash = std::hash<KeyT>,
+            class Allocator = std::allocator<Bucket>>
 class cuckoo_set {
  public:
   using iterator = Bucket::iterator;
@@ -245,7 +252,13 @@ class cuckoo_set {
     }
 
     for (size_t i = 0; i < NUM_THREADS; ++i) {
-      workers_[i].start(&cuckoo_set::hash_key, &cuckoo_set::get_bucket_id, &cuckoo_set::get_other_bucket_id, buckets_);
+      workers_[i].start(
+        this,
+        &cuckoo_set::hash_key,
+        &cuckoo_set::get_bucket_id,
+        &cuckoo_set::get_other_bucket_id,
+        buckets_
+      );
     }
   }
 
@@ -356,7 +369,7 @@ class cuckoo_set {
 
   size_t sz_{0};
 
-  std::array<cuckoo_worker, NUM_THREADS> workers_;
+  std::array<cuckoo_worker<Hash, Allocator>, NUM_THREADS> workers_;
   size_t counter_{0};
 };
 
