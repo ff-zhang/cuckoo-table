@@ -7,7 +7,7 @@
 #include "cuckoo_set.hpp"
 #include "hash.hpp"
 #include "huge_page_allocator.hpp"
-#include "thread_pool.hpp"
+#include "cuckoo_worker.hpp"
 
 constexpr size_t CAPACITY = 128 * 1024 * 1024;
 constexpr size_t LOAD_PERCENTAGE = 80;
