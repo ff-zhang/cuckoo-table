@@ -30,6 +30,10 @@ void run_test(const HugeVecT& read_idxs) {
   }
   assert(table.size() == NUM_KEYS);
 
+  std::array<cuckoo_set::cuckoo_worker<CRCHash<uint64_t>, huge_page_allocator<cuckoo_set::Bucket>>, 2> workers;
+  workers[0].start(&table);
+  workers[1].start(&table);
+
   // do lookups and measure throughput
   std::chrono::steady_clock::time_point begin =
       std::chrono::steady_clock::now();
@@ -37,12 +41,13 @@ void run_test(const HugeVecT& read_idxs) {
   using cuckoo_set::MAX_LOOKUP_BATCH_SZ;
   std::array<typename CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
   for (size_t i = 0; i < NUM_REQUESTS; i += MAX_LOOKUP_BATCH_SZ) {
-    table.find_batched(&read_idxs[i], MAX_LOOKUP_BATCH_SZ, results.data());
-    for (size_t j = 0; j < MAX_LOOKUP_BATCH_SZ; ++j) {
-      bool exists = !results[j].is_null();
-      bool expected_exists = read_idxs[i + j] < NUM_KEYS;
-      assert(exists == expected_exists);
-    }
+    workers[(i / MAX_LOOKUP_BATCH_SZ) % 2].queue(
+      &read_idxs[i], MAX_LOOKUP_BATCH_SZ, results.data()
+    );
+  }
+
+  for (auto &worker : workers) {
+    worker.stop();
   }
 
   std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();

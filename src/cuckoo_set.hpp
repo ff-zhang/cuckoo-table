@@ -49,15 +49,6 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
 
   std::array<KeyT, SLOTS_PER_BUCKET> key_slots;
 
-  iterator find(KeyT key) {
-    for (size_t i = 0; i < SLOTS_PER_BUCKET; ++i) {
-      if (key_slots[i] == key) {
-        return {&key_slots[i]};
-      }
-    }
-    return {};
-  }
-
   iterator find_simd(const KeyT key) {
     static_assert(SLOTS_PER_BUCKET == 4, "Only 4 slots supported");
 
@@ -120,35 +111,27 @@ static_assert(sizeof(Bucket) == hardware_constructive_interference_size / 2);
 template <class Hash, class Allocator>
 class cuckoo_set;
 
-template <class Hash, class Allocator>
+template <class Hash = std::hash<KeyT>,
+          class Allocator = std::allocator<Bucket>>
 class cuckoo_worker {
 public:
-  cuckoo_worker() :  self_(nullptr), stop_(false) {};
+  cuckoo_worker() :  table_(nullptr), stop_(false) {};
 
   ~cuckoo_worker() {
       stop();
   }
 
   void start(
-    cuckoo_set<Hash, Allocator>* self,
-    size_t (cuckoo_set<Hash, Allocator>::* hash_key)(KeyT),
-    size_t (cuckoo_set<Hash, Allocator>::* get_bucket_id)(size_t),
-    size_t (cuckoo_set<Hash, Allocator>::* get_other_bucket_id)(size_t, KeyT),
-    Bucket* buckets
+    cuckoo_set<Hash, Allocator>* table
   ) {
-    self_ = self;
-    hash_key_ = hash_key;
-    get_bucket_id_ = get_bucket_id;
-    get_other_bucket_id_ = get_other_bucket_id;
-    buckets_ = buckets;
-
+    table_ = table;
     thread_ = std::thread([this] { this->run(); });
   }
 
   void queue(const KeyT* keys, size_t num_key, Bucket::iterator* results) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      jobs_.emplace(std::move(keys), std::move(num_key), std::move(results));
+      jobs_.emplace(keys, num_key, results);
     }
     cv_.notify_one();
   }
@@ -164,51 +147,32 @@ public:
 
 private:
   void run() {
-    while (true) {
-      const KeyT* keys;
-      size_t num_keys;
-      Bucket::iterator* results;
+    std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id1s;
+    std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id2s;
 
+    while (true) {
       {
         std::unique_lock<std::mutex> lock(mutex_);
+        if (stop_ && jobs_.empty()) return;
         cv_.wait(lock, [&] { return stop_ || !jobs_.empty(); });
-
-        if (stop_ && jobs_.empty())
-            return;
-
-        std::tie(keys, num_keys, results) = std::move(jobs_.front());
-        jobs_.pop();
       }
 
-      std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id1s;
-      std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id2s;
+      while (!jobs_.empty()) {
+        const KeyT* keys;
+        size_t num_keys;
+        Bucket::iterator* results;
 
-      // Compute hashes and prefetch buckets
-      for (size_t i = 0; i < num_keys; ++i) {
-        bucket_id2s[i] = (self_->*hash_key_)(keys[i]);
-        bucket_id1s[i] = (self_->*get_bucket_id_)(bucket_id2s[i]);
-        __builtin_prefetch(&buckets_[bucket_id1s[i]], 0, 3);
-      }
-
-      // Search buckets via SIMD
-      for (size_t i = 0; i < num_keys; ++i) {
-        results[i] = buckets_[bucket_id1s[i]].find_simd(keys[i]);
-      }
-
-      // Search second bucket for any misses
-      for (size_t i = 0; i < num_keys; ++i) {
-        if (!results[i].is_null()) continue;
-        bucket_id2s[i] = (self_->*get_other_bucket_id_)(bucket_id2s[i], keys[i]);
-        __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
-      }
-      for (size_t i = 0; i < num_keys; ++i) {
-        if (!results[i].is_null()) continue;
-        results[i] = buckets_[bucket_id2s[i]].find_simd(keys[i]);
+        {
+          std::unique_lock<std::mutex> lock(mutex_);
+          std::tie(keys, num_keys, results) = std::move(jobs_.front());
+          jobs_.pop();
+        }
+        table_->find_batched(keys, num_keys, results);
       }
     }
   }
 
-  cuckoo_set<Hash, Allocator>* self_;
+  cuckoo_set<Hash, Allocator>* table_;
   bool stop_;
 
   std::thread thread_;
@@ -216,16 +180,10 @@ private:
 
   std::queue<std::tuple<const KeyT*, size_t, Bucket::iterator*>> jobs_;
   std::condition_variable cv_;
-
-  size_t (cuckoo_set<Hash, Allocator>::*hash_key_)(KeyT) = nullptr;
-  size_t (cuckoo_set<Hash, Allocator>::*get_bucket_id_)(size_t) = nullptr;
-  size_t (cuckoo_set<Hash, Allocator>::*get_other_bucket_id_)(size_t, KeyT) = nullptr;
-
-  Bucket* buckets_ = nullptr;
 };
 
-  template <class Hash = std::hash<KeyT>,
-            class Allocator = std::allocator<Bucket>>
+template <class Hash = std::hash<KeyT>,
+          class Allocator = std::allocator<Bucket>>
 class cuckoo_set {
  public:
   using iterator = Bucket::iterator;
@@ -242,7 +200,7 @@ class cuckoo_set {
     }
 
     buckets_ = allocator_.allocate(num_buckets_);
-    if ((uint64_t) (buckets_) % hardware_constructive_interference_size != 0) {
+    if ((uint64_t)(buckets_) % hardware_constructive_interference_size != 0) {
       throw std::runtime_error("buckets_ is not cache-aligned");
     }
 
@@ -250,23 +208,9 @@ class cuckoo_set {
     for (size_t i = 0; i < num_buckets_ * SLOTS_PER_BUCKET; ++i) {
       buckets_[i / SLOTS_PER_BUCKET].erase(i % SLOTS_PER_BUCKET);
     }
-
-    for (size_t i = 0; i < NUM_THREADS; ++i) {
-      workers_[i].start(
-        this,
-        &cuckoo_set::hash_key,
-        &cuckoo_set::get_bucket_id,
-        &cuckoo_set::get_other_bucket_id,
-        buckets_
-      );
-    }
   }
 
   ~cuckoo_set() {
-    for (auto &worker : workers_) {
-      worker.stop();
-    }
-
     if (buckets_) {
       allocator_.deallocate(buckets_, num_buckets_);
     }
@@ -292,7 +236,31 @@ class cuckoo_set {
   }
 
   void find_batched(const KeyT* keys, size_t num_keys, iterator* results) {
-    workers_[++counter_ % NUM_THREADS].queue(keys, num_keys, results);
+    std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id1s;
+    std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id2s;
+
+    // Compute hashes and prefetch buckets
+    for (size_t i = 0; i < num_keys; ++i) {
+      bucket_id2s[i] = hash_key(keys[i]);
+      bucket_id1s[i] = get_bucket_id(bucket_id2s[i]);
+      __builtin_prefetch(&buckets_[bucket_id1s[i]], 0, 3);
+    }
+
+    // Search buckets via SIMD
+    for (size_t i = 0; i < num_keys; ++i) {
+      results[i] = buckets_[bucket_id1s[i]].find_simd(keys[i]);
+    }
+
+    // Search second bucket for any misses
+    for (size_t i = 0; i < num_keys; ++i) {
+      if (!results[i].is_null()) continue;
+      bucket_id2s[i] = get_other_bucket_id(bucket_id2s[i], keys[i]);
+      __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
+    }
+    for (size_t i = 0; i < num_keys; ++i) {
+      if (!results[i].is_null()) continue;
+      results[i] = buckets_[bucket_id2s[i]].find_simd(keys[i]);
+    }
   }
 
   void erase(const iterator& it) {
@@ -368,9 +336,6 @@ class cuckoo_set {
   Bucket* buckets_;
 
   size_t sz_{0};
-
-  std::array<cuckoo_worker<Hash, Allocator>, NUM_THREADS> workers_;
-  size_t counter_{0};
 };
 
 }  // namespace cuckoo_set
