@@ -128,11 +128,14 @@ public:
     thread_ = std::thread([this] { this->run(); });
   }
 
-  void queue(const KeyT* keys) {
+  void queue(std::vector<size_t> indices) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      jobs_.emplace(keys);
+      indices_ = indices;
     }
+  }
+
+  void notify() {
     cv_.notify_one();
   }
 
@@ -150,18 +153,14 @@ private:
     while (true) {
       {
         std::unique_lock<std::mutex> lock(mutex_);
-        if (stop_ && jobs_.empty()) return;
-        cv_.wait(lock, [&] { return stop_ || !jobs_.empty(); });
-      }
+        if (stop_ && indices_.empty()) return;
+        cv_.wait(lock, [&] { return stop_ || !indices_.empty(); });
 
-      while (!jobs_.empty()) {
-        const KeyT* keys;
-        {
-          std::unique_lock<std::mutex> lock(mutex_);
-          std::tie(keys) = std::move(jobs_.front());
-          jobs_.pop();
+        for (size_t i = 0; i < indices_.size(); ++i) {
+          table_->find_batched(reinterpret_cast<const KeyT*>(&indices_[i]), MAX_LOOKUP_BATCH_SZ, results_.data());
         }
-        table_->find_batched(keys, MAX_LOOKUP_BATCH_SZ, results_.data());
+
+        return;
       }
     }
   }
@@ -172,7 +171,7 @@ private:
   std::thread thread_;
   std::mutex mutex_;
 
-  std::queue<std::tuple<const KeyT*>> jobs_;
+  std::vector<size_t> indices_;
   std::condition_variable cv_;
 
   std::array<Bucket::iterator, MAX_LOOKUP_BATCH_SZ> results_;
