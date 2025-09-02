@@ -47,8 +47,6 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
     KeyT* slot_;
   };
 
-  std::array<KeyT, SLOTS_PER_BUCKET> key_slots;
-
   iterator find_simd(const KeyT key) {
     static_assert(SLOTS_PER_BUCKET == 4, "Only 4 slots supported");
 
@@ -103,6 +101,8 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
   }
 
   static bool is_empty(const KeyT& key) { return key == NULL_KEY; }
+
+  std::array<KeyT, SLOTS_PER_BUCKET> key_slots;
 };
 static_assert(alignof(Bucket) == hardware_constructive_interference_size / 2);
 static_assert(sizeof(Bucket) == hardware_constructive_interference_size / 2);
@@ -128,10 +128,10 @@ public:
     thread_ = std::thread([this] { this->run(); });
   }
 
-  void queue(const KeyT* keys, size_t num_key, Bucket::iterator* results) {
+  void queue(const KeyT* keys, Bucket::iterator* results) {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      jobs_.emplace(keys, num_key, results);
+      jobs_.emplace(keys, results);
     }
     cv_.notify_one();
   }
@@ -147,9 +147,6 @@ public:
 
 private:
   void run() {
-    std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id1s;
-    std::array<size_t, MAX_LOOKUP_BATCH_SZ> bucket_id2s;
-
     while (true) {
       {
         std::unique_lock<std::mutex> lock(mutex_);
@@ -159,15 +156,13 @@ private:
 
       while (!jobs_.empty()) {
         const KeyT* keys;
-        size_t num_keys;
         Bucket::iterator* results;
-
         {
           std::unique_lock<std::mutex> lock(mutex_);
-          std::tie(keys, num_keys, results) = std::move(jobs_.front());
+          std::tie(keys, results) = std::move(jobs_.front());
           jobs_.pop();
         }
-        table_->find_batched(keys, num_keys, results);
+        table_->find_batched(keys, MAX_LOOKUP_BATCH_SZ, results);
       }
     }
   }
@@ -178,7 +173,7 @@ private:
   std::thread thread_;
   std::mutex mutex_;
 
-  std::queue<std::tuple<const KeyT*, size_t, Bucket::iterator*>> jobs_;
+  std::queue<std::tuple<const KeyT*, Bucket::iterator*>> jobs_;
   std::condition_variable cv_;
 };
 
@@ -254,7 +249,7 @@ class cuckoo_set {
     // Search second bucket for any misses
     for (size_t i = 0; i < num_keys; ++i) {
       if (!results[i].is_null()) continue;
-      bucket_id2s[i] = get_other_bucket_id(bucket_id2s[i], keys[i]);
+      bucket_id2s[i] = get_other_bucket_id(bucket_id1s[i], keys[i]);
       __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
     }
     for (size_t i = 0; i < num_keys; ++i) {

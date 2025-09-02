@@ -39,10 +39,10 @@ void run_test(const HugeVecT& read_idxs) {
       std::chrono::steady_clock::now();
 
   using cuckoo_set::MAX_LOOKUP_BATCH_SZ;
-  std::array<typename CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
+  std::array<CuckooTableT::iterator, NUM_REQUESTS> results{};
   for (size_t i = 0; i < NUM_REQUESTS; i += MAX_LOOKUP_BATCH_SZ) {
     workers[(i / MAX_LOOKUP_BATCH_SZ) % 2].queue(
-      &read_idxs[i], MAX_LOOKUP_BATCH_SZ, results.data()
+      reinterpret_cast<const cuckoo_set::KeyT*>(&read_idxs[i]), results.data()
     );
   }
 
