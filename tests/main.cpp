@@ -58,11 +58,12 @@ void run_test(const HugeVecT& read_idxs) {
     workers[i] = std::thread(worker, slices[i], slices[i + 1]);
   }
 
+  flag.store(true);
+  flag.notify_all();
+
   // do lookups and measure throughput
   std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
-  flag.store(true);
-  flag.notify_all();
   for (auto& t : workers) {
     t.join();
   }
