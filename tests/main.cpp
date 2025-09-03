@@ -1,7 +1,9 @@
 #include <cassert>
 #include <chrono>
+#include <future>
 #include <iostream>
 #include <random>
+#include <thread>
 #include <vector>
 
 #include "cuckoo_set.hpp"
@@ -14,10 +16,14 @@ constexpr size_t HIT_PERCENTAGE = 80;
 constexpr size_t NUM_REQUESTS = 100000000;
 constexpr size_t NUM_KEYS = CAPACITY * LOAD_PERCENTAGE / 100;
 
+constexpr size_t NUM_WORKERS = 2;
+
 using HugeVecT = std::vector<size_t, huge_page_allocator<size_t>>;
 using CuckooTableT = cuckoo_set::cuckoo_set<CRCHash<uint64_t>, huge_page_allocator<cuckoo_set::Bucket>>;
 
 void run_test(const HugeVecT& read_idxs) {
+  using cuckoo_set::MAX_LOOKUP_BATCH_SZ;
+
   CuckooTableT table(CAPACITY);
 
   // do insertions
@@ -30,28 +36,48 @@ void run_test(const HugeVecT& read_idxs) {
   }
   assert(table.size() == NUM_KEYS);
 
-  // do lookups and measure throughput
-  std::chrono::steady_clock::time_point begin =
-      std::chrono::steady_clock::now();
+  std::array<size_t, NUM_WORKERS + 1> slices{0};
+  for (size_t i = 1; i < NUM_WORKERS; ++i) {
+    const size_t slice_ = i * NUM_REQUESTS / NUM_WORKERS;
+    slices[i] = slice_ - slice_ % MAX_LOOKUP_BATCH_SZ;
+  }
+  slices[NUM_WORKERS] = NUM_REQUESTS;
 
-  using cuckoo_set::MAX_LOOKUP_BATCH_SZ;
-  std::array<typename CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
-  for (size_t i = 0; i < NUM_REQUESTS; i += MAX_LOOKUP_BATCH_SZ) {
-    table.find_batched(&read_idxs[i], MAX_LOOKUP_BATCH_SZ, results.data());
-    for (size_t j = 0; j < MAX_LOOKUP_BATCH_SZ; ++j) {
-      bool exists = !results[j].is_null();
-      bool expected_exists = read_idxs[i + j] < NUM_KEYS;
-      assert(exists == expected_exists);
+  std::atomic<bool> flag = false;
+  auto worker = [&](const size_t start, const size_t end) {
+    flag.wait(false);
+
+    std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
+
+    std::array<CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
+    for (size_t i = start; i < end; i += MAX_LOOKUP_BATCH_SZ) {
+      table.find_batched(
+        reinterpret_cast<const cuckoo_set::KeyT*>(&read_idxs[i]), MAX_LOOKUP_BATCH_SZ, results.data()
+      );
     }
+
+    std::chrono::steady_clock::time_point finish = std::chrono::steady_clock::now();
+
+    // do lookups and measure throughput
+    auto elapsed_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(finish - begin)
+            .count();
+    double throughput = static_cast<double>(end - start) / (elapsed_us / 1e6);
+
+    std::cout << "cuckoo_set lookup throughput: " << throughput << std::endl;
+  };
+
+  std::array<std::thread, NUM_WORKERS> workers;
+  for (size_t i = 0 ; i < NUM_WORKERS; ++i) {
+    workers[i] = std::thread(worker, slices[i], slices[i + 1]);
   }
 
-  std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();
-  auto elapsed_us =
-      std::chrono::duration_cast<std::chrono::microseconds>(end - begin)
-          .count();
-  double throughput = static_cast<double>(NUM_REQUESTS) / (elapsed_us / 1e6);
+  flag.store(true);
+  flag.notify_all();
 
-  std::cout << "cuckoo_set lookup throughput: " << throughput << std::endl;
+  for (auto &t : workers) {
+    if (t.joinable()) { t.join(); }
+  }
 
   // do deletions
   for (size_t i = 0; i < NUM_KEYS; ++i) {
