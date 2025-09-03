@@ -15,7 +15,9 @@ constexpr size_t NUM_REQUESTS = 100000000;
 constexpr size_t NUM_KEYS = CAPACITY * LOAD_PERCENTAGE / 100;
 
 using HugeVecT = std::vector<size_t, huge_page_allocator<size_t>>;
-using CuckooTableT = cuckoo_set::cuckoo_set<CRCHash<uint64_t>, huge_page_allocator<cuckoo_set::Bucket>>;
+using CuckooTableT = cuckoo_set::cuckoo_set<
+  CRCHash<uint64_t>, huge_page_allocator<cuckoo_set::Bucket>
+>;
 
 void run_test(const HugeVecT& read_idxs) {
   CuckooTableT table(CAPACITY);
@@ -30,19 +32,32 @@ void run_test(const HugeVecT& read_idxs) {
   }
   assert(table.size() == NUM_KEYS);
 
+  std::array<cuckoo_set::cuckoo_worker<CRCHash<uint64_t>, huge_page_allocator<cuckoo_set::Bucket>>, 2> workers;
+  workers[0].start(&table);
+  workers[1].start(&table);
+
+  std::vector<size_t> indices0;
+  std::vector<size_t> indices1;
+  using cuckoo_set::MAX_LOOKUP_BATCH_SZ;
+  for (size_t i = 0; i < NUM_REQUESTS / 2; ++i) {
+    indices0.emplace_back(read_idxs[i]);
+  }
+  for (size_t i = NUM_REQUESTS / 2; i < NUM_REQUESTS; ++i) {
+    indices1.emplace_back(read_idxs[i]);
+  }
+  workers[0].queue(std::move(indices0));
+  workers[1].queue(std::move(indices1));
+
+  for (auto &worker : workers) {
+    worker.notify();
+  }
+
   // do lookups and measure throughput
   std::chrono::steady_clock::time_point begin =
       std::chrono::steady_clock::now();
 
-  using cuckoo_set::MAX_LOOKUP_BATCH_SZ;
-  std::array<typename CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
-  for (size_t i = 0; i < NUM_REQUESTS; i += MAX_LOOKUP_BATCH_SZ) {
-    table.find_batched(&read_idxs[i], MAX_LOOKUP_BATCH_SZ, results.data());
-    for (size_t j = 0; j < MAX_LOOKUP_BATCH_SZ; ++j) {
-      bool exists = !results[j].is_null();
-      bool expected_exists = read_idxs[i + j] < NUM_KEYS;
-      assert(exists == expected_exists);
-    }
+  for (auto &worker : workers) {
+    worker.stop();
   }
 
   std::chrono::steady_clock::time_point end = std::chrono::steady_clock::now();

@@ -1,10 +1,14 @@
 #pragma once
 
 #include <array>
-#include <cstddef>
-#include <cstdint>
+#include <condition_variable>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <queue>
+#include <thread>
 #include <stdexcept>
+#include <utility>
 
 #include <arm_neon.h>
 
@@ -25,6 +29,8 @@ static_assert((SLOTS_PER_BUCKET & (SLOTS_PER_BUCKET - 1)) == 0);
 constexpr size_t MAX_LOOKUP_BATCH_SZ =
     hardware_constructive_interference_size / sizeof(KeyT);
 
+constexpr size_t NUM_THREADS = 2;
+
 // each bucket is half-a-cache-line sized, and aligned to that as well
 // i.e. we get 2 buckets per cache line
 struct alignas(hardware_constructive_interference_size / 2) Bucket {
@@ -40,17 +46,6 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
 
     KeyT* slot_;
   };
-
-  std::array<KeyT, SLOTS_PER_BUCKET> key_slots;
-
-  iterator find(KeyT key) {
-    for (size_t i = 0; i < SLOTS_PER_BUCKET; ++i) {
-      if (key_slots[i] == key) {
-        return {&key_slots[i]};
-      }
-    }
-    return {};
-  }
 
   iterator find_simd(const KeyT key) {
     static_assert(SLOTS_PER_BUCKET == 4, "Only 4 slots supported");
@@ -106,9 +101,81 @@ struct alignas(hardware_constructive_interference_size / 2) Bucket {
   }
 
   static bool is_empty(const KeyT& key) { return key == NULL_KEY; }
+
+  std::array<KeyT, SLOTS_PER_BUCKET> key_slots;
 };
 static_assert(alignof(Bucket) == hardware_constructive_interference_size / 2);
 static_assert(sizeof(Bucket) == hardware_constructive_interference_size / 2);
+
+
+template <class Hash, class Allocator>
+class cuckoo_set;
+
+template <class Hash = std::hash<KeyT>,
+          class Allocator = std::allocator<Bucket>>
+class cuckoo_worker {
+public:
+  cuckoo_worker() :  table_(nullptr), stop_(false) {};
+
+  ~cuckoo_worker() {
+      stop();
+  }
+
+  void start(
+    cuckoo_set<Hash, Allocator>* table
+  ) {
+    table_ = table;
+    thread_ = std::thread([this] { this->run(); });
+  }
+
+  void queue(std::vector<size_t> indices) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      indices_ = indices;
+    }
+  }
+
+  void notify() {
+    cv_.notify_one();
+  }
+
+  void stop() {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stop_ = true;
+    }
+    cv_.notify_one();
+    if (thread_.joinable()) { thread_.join(); }
+  }
+
+private:
+  void run() {
+    while (true) {
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (stop_ && indices_.empty()) return;
+        cv_.wait(lock, [&] { return stop_ || !indices_.empty(); });
+
+        for (size_t i = 0; i < indices_.size(); ++i) {
+          table_->find_batched(reinterpret_cast<const KeyT*>(&indices_[i]), MAX_LOOKUP_BATCH_SZ, results_.data());
+        }
+
+        return;
+      }
+    }
+  }
+
+  cuckoo_set<Hash, Allocator>* table_;
+  bool stop_;
+
+  std::thread thread_;
+  std::mutex mutex_;
+
+  std::vector<size_t> indices_;
+  std::condition_variable cv_;
+
+  std::array<Bucket::iterator, MAX_LOOKUP_BATCH_SZ> results_;
+};
 
 template <class Hash = std::hash<KeyT>,
           class Allocator = std::allocator<Bucket>>
@@ -117,11 +184,12 @@ class cuckoo_set {
   using iterator = Bucket::iterator;
 
   cuckoo_set(size_t capacity)
-      : hash_fn_(),
-        allocator_(),
-        num_buckets_(next_pow2(capacity) / SLOTS_PER_BUCKET),
-        bucket_bitmask_(num_buckets_ - 1),
-        buckets_() {
+    : hash_fn_(),
+      allocator_(),
+      num_buckets_(next_pow2(capacity) / SLOTS_PER_BUCKET),
+      bucket_bitmask_(num_buckets_ - 1),
+      buckets_()
+    {
     if ((num_buckets_ & (num_buckets_ - 1)) != 0) {
       throw std::invalid_argument("num_buckets must be a power of 2");
     }
@@ -181,7 +249,7 @@ class cuckoo_set {
     // Search second bucket for any misses
     for (size_t i = 0; i < num_keys; ++i) {
       if (!results[i].is_null()) continue;
-      bucket_id2s[i] = get_other_bucket_id(bucket_id2s[i], keys[i]);
+      bucket_id2s[i] = get_other_bucket_id(bucket_id1s[i], keys[i]);
       __builtin_prefetch(&buckets_[bucket_id2s[i]], 0, 3);
     }
     for (size_t i = 0; i < num_keys; ++i) {
