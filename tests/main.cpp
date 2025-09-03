@@ -43,13 +43,13 @@ void run_test(const HugeVecT& read_idxs) {
   }
   slices[NUM_WORKERS] = NUM_REQUESTS;
 
-  std::array<typename CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
   std::atomic<bool> flag = false;
   auto worker = [&](const size_t start, const size_t end) {
     flag.wait(false);
 
     std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
 
+    std::array<CuckooTableT::iterator, MAX_LOOKUP_BATCH_SZ> results{};
     for (size_t i = start; i < end; i += MAX_LOOKUP_BATCH_SZ) {
       table.find_batched(
         reinterpret_cast<const cuckoo_set::KeyT*>(&read_idxs[i]), MAX_LOOKUP_BATCH_SZ, results.data()
